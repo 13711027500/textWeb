@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>局域网聊天</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js"></script>
+
+</head>
+
+<body>
+  <div id="container">
+    <section id="users-section">
+      <div id="user-info">
+        <div id="current-user">
+          <span id="username-display">游客</span>
+          <button id="logoutBtn" style="display: none;">登出</button>
+        </div>
+      </div>
+      <h3>在线用户</h3>
+      <ul id="userList"></ul>
+    </section>
+
+    <section id="chat-section">
+      <div id="chat"></div>
+      <div id="input-area">
+        <textarea id="msgInput" placeholder="输入消息，Enter发送，Shift+Enter换行"></textarea>
+        <button id="sendBtn">发送</button>
+        <button id="attachBtn">📎</button>
+        <input type="file" id="fileInput" style="display: none" />
+        <button id="emojiBtn">😊</button>
+        <div id="settings-container">
+          <button id="settingsBtn">⚙️</button>
+          <div id="settingsMenu" class="hidden">
+            <label>气泡样式
+              <select id="bubbleStyleSelect">
+                <option value="rounded">圆角</option>
+                <option value="square">方形</option>
+                <option value="arrow">箭头</option>
+                <option value="bold">加粗</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 私聊窗口容器 -->
+  <div id="private-chat-container"></div>
+
+  <!-- Emoji picker 库 -->
+  <emoji-picker id="emojiPicker" style="display: none;"></emoji-picker>
+  <script src="script.js" defer></script>
+</body>
+
+</html>
