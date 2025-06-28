@@ -17,12 +17,12 @@ function savePrivateMessageToStorage(chatId, message) {
         const key = `${PRIVATE_CHAT_STORAGE_KEY}_${chatId}`;
         let history = JSON.parse(localStorage.getItem(key) || '[]');
         history.push(message);
-        
+
         // 限制消息数量
         if (history.length > MAX_PRIVATE_MESSAGES) {
             history = history.slice(-MAX_PRIVATE_MESSAGES);
         }
-        
+
         localStorage.setItem(key, JSON.stringify(history));
     } catch (e) {
         console.error('保存私聊消息到本地存储失败:', e);
@@ -45,7 +45,7 @@ function loadPrivateHistoryFromStorage(chatId) {
 function checkAuthStatus() {
     const token = localStorage.getItem('authToken');
     const user = localStorage.getItem('currentUser');
-    
+
     if (token && user) {
         try {
             currentUser = JSON.parse(user);
@@ -57,13 +57,13 @@ function checkAuthStatus() {
             clearAuthData();
         }
     }
-    
+
     // 如果没有登录，询问是否以游客身份进入
     if (!confirm('是否以游客身份进入聊天？\n点击"确定"以游客身份进入，点击"取消"前往登录页面')) {
         window.location.href = 'login.html';
         return false;
     }
-    
+
     isGuest = true;
     currentUser = { username: prompt("请输入昵称") || "匿名用户" };
     updateUserDisplay();
@@ -74,7 +74,7 @@ function checkAuthStatus() {
 function updateUserDisplay() {
     const usernameDisplay = document.getElementById('username-display');
     const logoutBtn = document.getElementById('logoutBtn');
-    
+
     if (currentUser) {
         usernameDisplay.textContent = currentUser.username;
         if (!isGuest) {
@@ -105,7 +105,96 @@ if (!checkAuthStatus()) {
     throw new Error('用户取消操作');
 }
 
-const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:3000`);
+// WebSocket 连接管理
+let ws = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 3000;
+
+function connectWebSocket() {
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${protocol}://${location.host}`;
+    
+    console.log('正在连接WebSocket:', wsUrl);
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+        console.log('WebSocket连接成功');
+        reconnectAttempts = 0;
+        
+        if (isGuest) {
+            // 游客模式
+            ws.send(JSON.stringify({ type: "join", user: currentUser.username }));
+        } else {
+            // 认证用户模式
+            ws.send(JSON.stringify({
+                type: "join",
+                user: currentUser.username,
+                token: authToken
+            }));
+        }
+    };
+    
+    ws.onclose = (event) => {
+        console.log('WebSocket连接关闭:', event.code, event.reason);
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++;
+            console.log(`尝试重连 (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+            setTimeout(connectWebSocket, RECONNECT_DELAY);
+        } else {
+            console.error('WebSocket重连失败，请刷新页面重试');
+            alert('连接服务器失败，请检查网络连接或刷新页面重试');
+        }
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket连接错误:', error);
+    };
+    
+    ws.onmessage = async (event) => {
+        const raw = event.data instanceof Blob ? await event.data.text() : event.data;
+        let data;
+        try { data = JSON.parse(raw); } catch { return; }
+
+        if (data.type === 'message') {
+            appendMessage(data, true);
+        } else if (data.type === 'join') {
+            appendMessage({ type: 'system', text: `👋 ${data.user} 加入了聊天室` }, false);
+        } else if (data.type === 'leave') {
+            appendMessage({ type: 'system', text: `❌ ${data.user} 离开了聊天室` }, false);
+        } else if (data.type === 'users') {
+            updateUserList(data.list);
+        } else if (data.type === 'file') {
+            appendMessage(data, true);
+        } else if (data.type === 'private_message') {
+            // 只处理别人发给自己的消息
+            if (data.from === currentUser.username) return;
+            const chatId = [data.from, data.to].sort().join('_');
+            if (!privateChatWindows.has(chatId)) {
+                const targetUser = data.from === currentUser.username ? data.to : data.from;
+                openPrivateChat(targetUser);
+            }
+            addPrivateMessage(chatId, data.from, data.text, false);
+            const window = privateChatWindows.get(chatId);
+            if (window) {
+                window.style.animation = 'none';
+                setTimeout(() => {
+                    window.style.animation = 'chatWindowIn 0.3s ease-out';
+                }, 10);
+            }
+        } else if (data.type === 'recall_message') {
+            // 处理撤回消息
+            handleRecallMessage(data);
+        } else if (data.type === 'error') {
+            console.error('服务器错误:', data.message);
+            alert('服务器错误: ' + data.message);
+        }
+    };
+}
+
+// 初始化WebSocket连接
+connectWebSocket();
 
 const chat = document.getElementById('chat');
 const input = document.getElementById('msgInput');
@@ -134,12 +223,12 @@ function saveMessageToStorage(message) {
     try {
         let history = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) || '[]');
         history.push(message);
-        
+
         // 限制消息数量
         if (history.length > MAX_MESSAGES) {
             history = history.slice(-MAX_MESSAGES);
         }
-        
+
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(history));
     } catch (e) {
         console.error('保存消息到本地存储失败:', e);
@@ -218,30 +307,15 @@ bubbleSelect.onchange = () => {
     document.body.setAttribute('data-bubble', style);
 };
 
-// WebSocket连接建立后通知加入
-ws.onopen = () => {
-    if (isGuest) {
-        // 游客模式
-        ws.send(JSON.stringify({ type: "join", user: currentUser.username }));
-    } else {
-        // 认证用户模式
-        ws.send(JSON.stringify({ 
-            type: "join", 
-            user: currentUser.username,
-            token: authToken 
-        }));
-    }
-};
-
 // 显示消息
 function appendMessage(data, saveToStorage = true) {
     const msg = document.createElement('div');
     msg.className = data.user === currentUser.username ? 'self' : (data.type === 'system' ? 'system' : 'other');
-    
+
     // 为消息添加唯一ID（用于撤回功能）
     const messageId = data.messageId || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     msg.setAttribute('data-message-id', messageId);
-    
+
     // 为当前用户的消息添加右键菜单（包括文本消息和文件消息）
     if (data.user === currentUser.username && (data.type === 'message' || data.type === 'file')) {
         msg.addEventListener('contextmenu', (e) => {
@@ -274,7 +348,7 @@ function appendMessage(data, saveToStorage = true) {
 
     chat.appendChild(msg);
     chat.scrollTop = chat.scrollHeight;
-    
+
     // 保存到本地存储（除了系统消息）
     if (saveToStorage && data.type !== 'system') {
         saveMessageToStorage(data);
@@ -288,7 +362,7 @@ function showMessageContextMenu(e, messageId, messageData) {
     if (existingMenu) {
         existingMenu.remove();
     }
-    
+
     // 创建右键菜单
     const menu = document.createElement('div');
     menu.className = 'message-context-menu';
@@ -296,11 +370,11 @@ function showMessageContextMenu(e, messageId, messageData) {
     menu.style.left = e.clientX + 'px';
     menu.style.top = e.clientY + 'px';
     menu.style.zIndex = '9999';
-    
+
     // 检查消息是否在撤回时间范围内（2分钟内）
     const messageTime = messageData.time || Date.now();
     const canRecall = (Date.now() - messageTime) <= 2 * 60 * 1000; // 2分钟
-    
+
     if (canRecall) {
         const recallBtn = document.createElement('div');
         recallBtn.className = 'context-menu-item';
@@ -311,11 +385,11 @@ function showMessageContextMenu(e, messageId, messageData) {
         });
         menu.appendChild(recallBtn);
     }
-    
+
     // 复制消息内容
     const copyBtn = document.createElement('div');
     copyBtn.className = 'context-menu-item';
-    
+
     if (messageData.type === 'file') {
         copyBtn.textContent = '复制文件名';
         copyBtn.addEventListener('click', () => {
@@ -330,9 +404,9 @@ function showMessageContextMenu(e, messageId, messageData) {
         });
     }
     menu.appendChild(copyBtn);
-    
+
     document.body.appendChild(menu);
-    
+
     // 点击其他地方关闭菜单
     const closeMenu = (e) => {
         if (!menu.contains(e.target)) {
@@ -340,7 +414,7 @@ function showMessageContextMenu(e, messageId, messageData) {
             document.removeEventListener('click', closeMenu);
         }
     };
-    
+
     // 延迟添加事件监听器，避免立即触发
     setTimeout(() => {
         document.addEventListener('click', closeMenu);
@@ -349,23 +423,34 @@ function showMessageContextMenu(e, messageId, messageData) {
 
 // 撤回消息
 function recallMessage(messageId, messageData) {
-    // 发送撤回请求到服务器
-    ws.send(JSON.stringify({
-        type: 'recall_message',
-        messageId: messageId,
-        user: currentUser.username,
-        originalMessage: messageData
-    }));
-    
-    // 立即在本地显示撤回状态
-    const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
-    if (messageElement) {
-        if (messageData.type === 'file') {
-            messageElement.innerHTML = '<em style="color: #999; font-style: italic;">文件已撤回</em>';
-        } else {
-            messageElement.innerHTML = '<em style="color: #999; font-style: italic;">消息已撤回</em>';
+    // 检查WebSocket连接状态
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('连接已断开，正在尝试重连...');
+        return;
+    }
+
+    try {
+        // 发送撤回请求到服务器
+        ws.send(JSON.stringify({
+            type: 'recall_message',
+            messageId: messageId,
+            user: currentUser.username,
+            originalMessage: messageData
+        }));
+
+        // 立即在本地显示撤回状态
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (messageElement) {
+            if (messageData.type === 'file') {
+                messageElement.innerHTML = '<em style="color: #999; font-style: italic;">文件已撤回</em>';
+            } else {
+                messageElement.innerHTML = '<em style="color: #999; font-style: italic;">消息已撤回</em>';
+            }
+            messageElement.style.opacity = '0.6';
         }
-        messageElement.style.opacity = '0.6';
+    } catch (error) {
+        console.error('撤回消息失败:', error);
+        alert('撤回消息失败，请重试');
     }
 }
 
@@ -389,34 +474,34 @@ function updateUserList(users) {
     userList.innerHTML = '';
     users.forEach(user => {
         const li = document.createElement('li');
-        
+
         // 创建用户头像
         const avatar = document.createElement('div');
         avatar.className = 'user-avatar';
         avatar.textContent = user.charAt(0).toUpperCase();
-        
+
         // 创建用户信息容器
         const userInfo = document.createElement('div');
         userInfo.className = 'user-info';
-        
+
         // 创建用户名
         const userName = document.createElement('div');
         userName.className = 'user-name';
         userName.textContent = user;
-        
+
         // 创建在线状态
         const userStatus = document.createElement('div');
         userStatus.className = 'user-status';
         userStatus.textContent = '在线';
-        
+
         // 组装用户信息
         userInfo.appendChild(userName);
         userInfo.appendChild(userStatus);
-        
+
         // 组装列表项
         li.appendChild(avatar);
         li.appendChild(userInfo);
-        
+
         // 如果是当前用户，添加特殊样式
         if (user === currentUser.username) {
             li.style.border = '2px solid #4CAF50';
@@ -426,7 +511,7 @@ function updateUserList(users) {
             li.style.cursor = 'pointer';
             li.addEventListener('click', () => openPrivateChat(user));
         }
-        
+
         userList.appendChild(li);
     });
 }
@@ -437,9 +522,9 @@ function openPrivateChat(targetUser) {
         alert('不能和自己私聊！');
         return;
     }
-    
+
     const chatId = [currentUser.username, targetUser].sort().join('_');
-    
+
     // 如果私聊窗口已存在，则显示它
     if (privateChatWindows.has(chatId)) {
         const window = privateChatWindows.get(chatId);
@@ -447,19 +532,19 @@ function openPrivateChat(targetUser) {
         window.style.zIndex = getNextZIndex();
         return;
     }
-    
+
     // 创建新的私聊窗口
     const chatWindow = createPrivateChatWindow(targetUser, chatId);
     privateChatWindows.set(chatId, chatWindow);
-    
+
     // 初始化私聊消息数组
     if (!privateChats.has(chatId)) {
         privateChats.set(chatId, []);
     }
-    
+
     // 将窗口添加到容器
     document.getElementById('private-chat-container').appendChild(chatWindow);
-    
+
     // 加载历史消息
     loadPrivateChatHistory(chatId);
 }
@@ -470,13 +555,13 @@ function createPrivateChatWindow(targetUser, chatId) {
     window.style.left = '20px';
     window.style.top = '20px';
     window.style.zIndex = getNextZIndex();
-    
+
     // 计算窗口位置，避免重叠
     const existingWindows = document.querySelectorAll('.private-chat-window');
     const offset = existingWindows.length * 30;
     window.style.left = (20 + offset) + 'px';
     window.style.top = (20 + offset) + 'px';
-    
+
     window.innerHTML = `
         <div class="private-chat-header">
             <div class="chat-title">与 ${targetUser} 私聊</div>
@@ -490,7 +575,7 @@ function createPrivateChatWindow(targetUser, chatId) {
             </div>
         </div>
     `;
-    
+
     // 绑定回车发送
     const textarea = window.querySelector(`#private-input-${chatId}`);
     textarea.addEventListener('keydown', (e) => {
@@ -499,16 +584,16 @@ function createPrivateChatWindow(targetUser, chatId) {
             sendPrivateMessage(chatId, targetUser);
         }
     });
-    
+
     // 自动调整文本框高度
     textarea.addEventListener('input', () => {
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 80) + 'px';
     });
-    
+
     // 添加窗口拖拽功能
     makePrivateChatDraggable(window);
-    
+
     return window;
 }
 
@@ -557,45 +642,56 @@ function closePrivateChat(chatId) {
 function sendPrivateMessage(chatId, targetUser) {
     const textarea = document.getElementById(`private-input-${chatId}`);
     const message = textarea.value.trim();
-    
+
     if (!message) return;
-    
-    // 发送私聊消息
-    ws.send(JSON.stringify({
-        type: 'private_message',
-        from: currentUser.username,
-        to: targetUser,
-        text: message
-    }));
-    
-    // 清空输入框
-    textarea.value = '';
-    textarea.style.height = 'auto';
-    
-    // 添加消息到私聊窗口
-    addPrivateMessage(chatId, currentUser.username, message, true);
+
+    // 检查WebSocket连接状态
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('连接已断开，正在尝试重连...');
+        return;
+    }
+
+    try {
+        // 发送私聊消息
+        ws.send(JSON.stringify({
+            type: 'private_message',
+            from: currentUser.username,
+            to: targetUser,
+            text: message
+        }));
+
+        // 清空输入框
+        textarea.value = '';
+        textarea.style.height = 'auto';
+
+        // 添加消息到私聊窗口
+        addPrivateMessage(chatId, currentUser.username, message, true);
+    } catch (error) {
+        console.error('发送私聊消息失败:', error);
+        alert('发送私聊消息失败，请重试');
+    }
 }
 
 function addPrivateMessage(chatId, sender, text, isSelf = false) {
     const messagesContainer = document.getElementById(`private-messages-${chatId}`);
     if (!messagesContainer) return;
-    
+
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${isSelf ? 'self' : 'other'}`;
-    
-    const time = new Date().toLocaleTimeString('zh-CN', { 
-        hour: '2-digit', 
-        minute: '2-digit' 
+
+    const time = new Date().toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit'
     });
-    
+
     messageDiv.innerHTML = `
         ${text}
         <span class="time">${time}</span>
     `;
-    
+
     messagesContainer.appendChild(messageDiv);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    
+
     // 保存私聊消息到内存
     const messages = privateChats.get(chatId) || [];
     const messageObj = {
@@ -606,7 +702,7 @@ function addPrivateMessage(chatId, sender, text, isSelf = false) {
     };
     messages.push(messageObj);
     privateChats.set(chatId, messages);
-    
+
     // 保存到本地存储
     savePrivateMessageToStorage(chatId, messageObj);
 }
@@ -625,83 +721,56 @@ function getNextZIndex() {
 function loadPrivateChatHistory(chatId) {
     const history = loadPrivateHistoryFromStorage(chatId);
     const messagesContainer = document.getElementById(`private-messages-${chatId}`);
-    
+
     if (!messagesContainer) return;
-    
+
     history.forEach(msg => {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${msg.isSelf ? 'self' : 'other'}`;
-        
-        const time = new Date(msg.time).toLocaleTimeString('zh-CN', { 
-            hour: '2-digit', 
-            minute: '2-digit' 
+
+        const time = new Date(msg.time).toLocaleTimeString('zh-CN', {
+            hour: '2-digit',
+            minute: '2-digit'
         });
-        
+
         messageDiv.innerHTML = `
             ${msg.text}
             <span class="time">${time}</span>
         `;
-        
+
         messagesContainer.appendChild(messageDiv);
     });
-    
+
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
-
-// 接收 WebSocket 消息
-ws.onmessage = async (event) => {
-    const raw = event.data instanceof Blob ? await event.data.text() : event.data;
-    let data;
-    try { data = JSON.parse(raw); } catch { return; }
-
-    if (data.type === 'message') {
-        appendMessage(data, true);
-    } else if (data.type === 'join') {
-        appendMessage({ type: 'system', text: `👋 ${data.user} 加入了聊天室` }, false);
-    } else if (data.type === 'leave') {
-        appendMessage({ type: 'system', text: `❌ ${data.user} 离开了聊天室` }, false);
-    } else if (data.type === 'users') {
-        updateUserList(data.list);
-    } else if (data.type === 'file') {
-        appendMessage(data, true);
-    } else if (data.type === 'private_message') {
-        // 只处理别人发给自己的消息
-        if (data.from === currentUser.username) return;
-        const chatId = [data.from, data.to].sort().join('_');
-        if (!privateChatWindows.has(chatId)) {
-            const targetUser = data.from === currentUser.username ? data.to : data.from;
-            openPrivateChat(targetUser);
-        }
-        addPrivateMessage(chatId, data.from, data.text, false);
-        const window = privateChatWindows.get(chatId);
-        if (window) {
-            window.style.animation = 'none';
-            setTimeout(() => {
-                window.style.animation = 'chatWindowIn 0.3s ease-out';
-            }, 10);
-        }
-    } else if (data.type === 'recall_message') {
-        // 处理撤回消息
-        handleRecallMessage(data);
-    }
-};
 
 // 发送消息
 function sendMessage() {
     const val = input.value.trim();
     if (!val) return;
-    
+
+    // 检查WebSocket连接状态
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('连接已断开，正在尝试重连...');
+        return;
+    }
+
     // 生成消息ID
     const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    ws.send(JSON.stringify({ 
-        type: "message", 
-        user: currentUser.username, 
-        text: val,
-        messageId: messageId,
-        time: Date.now()
-    }));
-    input.value = '';
+
+    try {
+        ws.send(JSON.stringify({
+            type: "message",
+            user: currentUser.username,
+            text: val,
+            messageId: messageId,
+            time: Date.now()
+        }));
+        input.value = '';
+    } catch (error) {
+        console.error('发送消息失败:', error);
+        alert('发送消息失败，请重试');
+    }
 }
 sendBtn.onclick = sendMessage;
 input.addEventListener('keydown', e => {
@@ -716,20 +785,33 @@ attachBtn.onclick = () => fileInput.click();
 fileInput.onchange = () => {
     const file = fileInput.files[0];
     if (!file) return;
+    
+    // 检查WebSocket连接状态
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('连接已断开，正在尝试重连...');
+        fileInput.value = '';
+        return;
+    }
+    
     const reader = new FileReader();
     reader.onload = () => {
         // 生成文件消息ID
         const messageId = `file_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
-        ws.send(JSON.stringify({
-            type: 'file',
-            user: currentUser.username,
-            fileName: file.name,
-            fileType: file.type,
-            fileData: reader.result,
-            messageId: messageId,
-            time: Date.now()
-        }));
+
+        try {
+            ws.send(JSON.stringify({
+                type: 'file',
+                user: currentUser.username,
+                fileName: file.name,
+                fileType: file.type,
+                fileData: reader.result,
+                messageId: messageId,
+                time: Date.now()
+            }));
+        } catch (error) {
+            console.error('发送文件失败:', error);
+            alert('发送文件失败，请重试');
+        }
     };
     reader.readAsDataURL(file);
     fileInput.value = '';
